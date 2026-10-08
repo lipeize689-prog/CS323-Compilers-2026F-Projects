@@ -97,8 +97,9 @@ functionDef
  */
 parameterList
     : parameter (COMMA parameter)*
+    | parameter parameter
+      { reportMissing(SplcParser.COMMA, currentLine()); }
     ;
-
 parameter
     : variableDecl
     ;
@@ -148,9 +149,52 @@ expressionStatement
  * The temporary Number-only rule keeps the starter grammar compilable.
  */
 expression
-    : Number
-    ;
+    // 函数调用、数组访问、成员访问
+    : Identifier LPAREN argumentList? RPAREN
+    | expression LBRACK expression RBRACK
+    | expression DOT Identifier
 
+    // POW 右结合
+    | <assoc=right> expression POW expression
+
+    // 一元 PLUS MINUS NOT
+    | PLUS expression
+    | MINUS expression
+    | NOT expression
+
+    // MUL DIV MOD
+    | expression MUL expression
+    | expression DIV expression
+    | expression MOD expression
+
+    // PLUS MINUS
+    | expression PLUS expression
+    | expression MINUS expression
+
+    // LT LE GT GE
+    | expression LT expression
+    | expression LE expression
+    | expression GT expression
+    | expression GE expression
+
+    // EQ NEQ
+    | expression EQ expression
+    | expression NEQ expression
+
+    // AND
+    | expression AND expression
+
+    // OR
+    | expression OR expression
+
+    // ASSIGN 右结合
+    | <assoc=right> expression ASSIGN expression
+
+    // 基本形式
+    | Number
+    | Identifier
+    | LPAREN expression RPAREN
+    ;
 argumentList
     : expression (COMMA expression)*
     ;
@@ -174,7 +218,7 @@ OR : '||';
 ASSIGN : '=';
 PLUS : '+';
 MINUS : '-';
-STAR : '*';
+MUL : '*';
 DIV : '/';
 MOD : '%';
 POW : '^';
