@@ -96,9 +96,10 @@ functionDef
  * generic recovery strategy alone.  Extend this rule according to the spec.
  */
 parameterList
-    : parameter (COMMA parameter)*
-    | parameter parameter
-      { reportMissing(SplcParser.COMMA, currentLine()); }
+    : parameter
+      ( COMMA parameter
+      | { reportMissing(SplcParser.COMMA, currentLine()); } parameter
+      )*
     ;
 parameter
     : variableDecl
@@ -149,37 +150,32 @@ expressionStatement
  * The temporary Number-only rule keeps the starter grammar compilable.
  */
 expression
-    // 函数调用、数组访问、成员访问
+    // 函数调用
     : Identifier LPAREN argumentList? RPAREN
-    | expression LBRACK expression RBRACK
-    | expression DOT Identifier
+
+    // 数组访问、成员访问
+    | expression
+      ( LBRACK expression RBRACK
+      | DOT Identifier
+      )
 
     // POW 右结合
     | <assoc=right> expression POW expression
 
-    // 一元 PLUS MINUS NOT
-    | PLUS expression
-    | MINUS expression
-    | NOT expression
+    // 一元 PLUS、MINUS、NOT
+    | (PLUS | MINUS | NOT) expression
 
-    // MUL DIV MOD
-    | expression MUL expression
-    | expression DIV expression
-    | expression MOD expression
+    // MUL、DIV、MOD
+    | expression (MUL | DIV | MOD) expression
 
-    // PLUS MINUS
-    | expression PLUS expression
-    | expression MINUS expression
+    // PLUS、MINUS
+    | expression (PLUS | MINUS) expression
 
-    // LT LE GT GE
-    | expression LT expression
-    | expression LE expression
-    | expression GT expression
-    | expression GE expression
+    // LT、LE、GT、GE
+    | expression (LT | LE | GT | GE) expression
 
-    // EQ NEQ
-    | expression EQ expression
-    | expression NEQ expression
+    // EQ、NEQ
+    | expression (EQ | NEQ) expression
 
     // AND
     | expression AND expression

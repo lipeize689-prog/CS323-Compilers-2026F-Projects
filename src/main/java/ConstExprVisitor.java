@@ -27,42 +27,49 @@ public class ConstExprVisitor extends SplcBaseVisitor<Integer> {
         if(!isConstExpr(expr)){
             return null;
         }
-        Integer value = visit(expr);
+        Integer value = evaluateConstExpr(expr);
         if(value == null) return null;
         addResult(expr.getText(), value);
 
         return null;
     }
 
-    @Override
-    public Integer visitExpression(SplcParser.ExpressionContext ctx){
+    /**
+     * Evaluate an expression that has already been accepted by isConstExpr.
+     *
+     * This deliberately is not a visitExpression override.  The visitor is
+     * also used to walk return statements and ordinary expression statements;
+     * evaluating those expressions would attempt to unbox null for variables
+     * in expressions such as {@code return x + 1;}.
+     */
+    private Integer evaluateConstExpr(SplcParser.ExpressionContext ctx){
         if(ctx.Number() != null){
             return Integer.parseInt(ctx.Number().getText());
         }
 
         if(ctx.LPAREN() != null && ctx.Identifier() == null){
-            return visit(ctx.expression(0));
+            return evaluateConstExpr(ctx.expression(0));
         }
         if(ctx.PLUS() != null && ctx.expression().size() == 1){
-            return visit(ctx.expression(0));
+            return evaluateConstExpr(ctx.expression(0));
         }
         if(ctx.MINUS() != null && ctx.expression().size() == 1){
-            return -visit(ctx.expression(0));
+            return -evaluateConstExpr(ctx.expression(0));
         }
         if(ctx.PLUS() != null && ctx.expression().size() == 2){
-            return visit(ctx.expression(0)) + visit(ctx.expression(1));
+            return evaluateConstExpr(ctx.expression(0)) + evaluateConstExpr(ctx.expression(1));
         }
         if(ctx.MINUS() != null && ctx.expression().size() == 2){
-            return visit(ctx.expression(0)) - visit(ctx.expression(1));
+            return evaluateConstExpr(ctx.expression(0)) - evaluateConstExpr(ctx.expression(1));
         }
         if(ctx.MUL() != null && ctx.expression().size() == 2){
-            return visit(ctx.expression(0)) * visit(ctx.expression(1));
+            return evaluateConstExpr(ctx.expression(0)) * evaluateConstExpr(ctx.expression(1));
         }
         if(ctx.DIV() != null && ctx.expression().size() == 2){
-            return visit(ctx.expression(0)) / visit(ctx.expression(1));
+            return evaluateConstExpr(ctx.expression(0)) / evaluateConstExpr(ctx.expression(1));
         }
         if(ctx.MOD() != null && ctx.expression().size() == 2){
-            return visit(ctx.expression(0)) % visit(ctx.expression(1));
+            return evaluateConstExpr(ctx.expression(0)) % evaluateConstExpr(ctx.expression(1));
         }
         return null;
     }
