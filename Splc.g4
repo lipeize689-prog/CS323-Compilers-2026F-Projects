@@ -165,8 +165,8 @@ expression
     // 一元 PLUS、MINUS、NOT
     | (PLUS | MINUS | NOT) expression
 
-    // MUL、DIV、MOD
-    | expression (MUL | DIV | MOD) expression
+    // STAR、DIV、MOD
+    | expression (STAR | DIV | MOD) expression
 
     // PLUS、MINUS
     | expression (PLUS | MINUS) expression
@@ -214,7 +214,7 @@ OR : '||';
 ASSIGN : '=';
 PLUS : '+';
 MINUS : '-';
-MUL : '*';
+STAR : '*';
 DIV : '/';
 MOD : '%';
 POW : '^';

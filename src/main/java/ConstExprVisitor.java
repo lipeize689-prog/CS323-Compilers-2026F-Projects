@@ -62,7 +62,7 @@ public class ConstExprVisitor extends SplcBaseVisitor<Integer> {
         if(ctx.MINUS() != null && ctx.expression().size() == 2){
             return evaluateConstExpr(ctx.expression(0)) - evaluateConstExpr(ctx.expression(1));
         }
-        if(ctx.MUL() != null && ctx.expression().size() == 2){
+        if(ctx.STAR() != null && ctx.expression().size() == 2){
             return evaluateConstExpr(ctx.expression(0)) * evaluateConstExpr(ctx.expression(1));
         }
         if(ctx.DIV() != null && ctx.expression().size() == 2){
@@ -93,7 +93,7 @@ public class ConstExprVisitor extends SplcBaseVisitor<Integer> {
         if(context.MINUS() != null && context.expression().size() == 2){
             return isConstExpr(context.expression(0)) && isConstExpr(context.expression(1));
         }
-        if(context.MUL() != null && context.expression().size() == 2){
+        if(context.STAR() != null && context.expression().size() == 2){
             return isConstExpr(context.expression(0)) && isConstExpr(context.expression(1));
         }
         if(context.DIV() != null && context.expression().size() == 2){
