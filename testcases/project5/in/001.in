@@ -1,0 +1,35 @@
+CASES 10
+=== SOURCE ===
+int main0(){
+    int a;
+    int b;
+    int c;
+    a=read();
+    b=read();
+    c=(a+b)*2-(a%b);
+    write(c);
+    write(2^3^2);
+    write(a<b || a==b);
+    return 0;
+}
+=== INPUT 1 ===
+-13 3
+=== INPUT 2 ===
+19 5
+=== INPUT 3 ===
+-17 -3
+=== INPUT 4 ===
+0 7
+=== INPUT 5 ===
+9 -2
+=== INPUT 6 ===
+2 4
+=== INPUT 7 ===
+11 1
+=== INPUT 8 ===
+-4 7
+=== INPUT 9 ===
+-16 -2
+=== INPUT 10 ===
+-3 2
+=== END ===

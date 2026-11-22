@@ -1,0 +1,12 @@
+lexer grammar SplLexer;
+STRUCT:'struct'; INT:'int'; IF:'if'; ELSE:'else'; WHILE:'while'; RETURN:'return';
+POW:'^'; PLUS:'+'; MINUS:'-'; MUL:'*'; DIV:'/'; MOD:'%';
+LE:'<='; GE:'>='; EQ:'=='; NEQ:'!='; LT:'<'; GT:'>';
+AND:'&&'; OR:'||'; NOT:'!'; ASSIGN:'=';
+DOT:'.'; LPAREN:'('; RPAREN:')'; LBRACK:'['; RBRACK:']'; LBRACE:'{'; RBRACE:'}';
+SEMI:';'; COMMA:',';
+Identifier:[a-zA-Z_][a-zA-Z_0-9]*;
+Number:'0'|[1-9][0-9]*;
+WS:[ \r\t\n]+ ->skip;
+LINE_COMMENT:'//' ~[\r\n]* ->skip;
+BLOCK_COMMENT:'/*' .*? '*/' ->skip;

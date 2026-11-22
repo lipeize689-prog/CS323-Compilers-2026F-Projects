@@ -1,0 +1,40 @@
+CASES 10
+=== SOURCE ===
+int gcd(int a,int b){
+    int r;
+    while(b!=0){
+        r=a%b;
+        a=b;
+        b=r;
+    }
+    return a;
+}
+int main0(){
+    int a;
+    int b;
+    a=read();
+    b=read();
+    write(gcd(a,b));
+    return 0;
+}
+=== INPUT 1 ===
+51 73
+=== INPUT 2 ===
+38 73
+=== INPUT 3 ===
+47 71
+=== INPUT 4 ===
+79 81
+=== INPUT 5 ===
+7 49
+=== INPUT 6 ===
+13 1
+=== INPUT 7 ===
+59 61
+=== INPUT 8 ===
+18 120
+=== INPUT 9 ===
+60 23
+=== INPUT 10 ===
+111 56
+=== END ===

@@ -1,0 +1,4 @@
+int main0() {
+    write(42);
+    return 0;
+}

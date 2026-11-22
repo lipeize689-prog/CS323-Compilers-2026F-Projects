@@ -1,0 +1,35 @@
+CASES 10
+=== SOURCE ===
+int x;
+int main0(){
+    int x;
+    x=read();
+    {
+        int x;
+        x=read();
+        write(x);
+    }
+    write(x);
+    return 0;
+}
+=== INPUT 1 ===
+-11 8
+=== INPUT 2 ===
+-19 -16
+=== INPUT 3 ===
+-10 16
+=== INPUT 4 ===
+14 7
+=== INPUT 5 ===
+18 6
+=== INPUT 6 ===
+-8 -11
+=== INPUT 7 ===
+20 -14
+=== INPUT 8 ===
+-3 19
+=== INPUT 9 ===
+-15 4
+=== INPUT 10 ===
+9 -8
+=== END ===
