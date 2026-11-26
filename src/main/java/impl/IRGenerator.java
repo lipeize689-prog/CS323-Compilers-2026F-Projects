@@ -13,6 +13,7 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
     protected void emit(String line) { ir.append(line).append('\n'); }
     private int varCount = 0;
     private int tempCount = 0;
+    private int labelCount = 0; // 逻辑运算的标签
     /** The ONLY required interface for the fixed framework. */
     private static class SplType {
         final SplType elementType; // 数组
@@ -72,13 +73,257 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
             this.operand = operand;
         }
     }
+    private static class Address {
+        final SplType type;
+        final String pointer;
+        
+        Address(SplType type, String pointer){
+            this.type = type;
+            this.pointer = pointer;
+        }
+    }
+    private String freshTemp(){
+        return "%t" + (tempCount++);
+    }
+    private String freshLable(){
+        return "bb." + (labelCount++);
+    }
+    // 条件跳转方法 真，跳到 trueLabel 假，跳到 falseLabel
+    private void emitCond(Splc.ExpressionContext ctx, String trueLabel, String falseLabel){
+        // 括号
+        if(ctx.LPAREN() != null && ctx.expression().size() == 1){
+            emitCond(ctx.expression(0), trueLabel, falseLabel);
+            return;
+        }
+
+        // 短路与，左边真执行右边
+        if(ctx.AND() != null){
+            String rhsLabel = freshLable();
+            emitCond(ctx.expression(0), rhsLabel, falseLabel); // 如果expression(0)是真，逻辑表达式的计算就跳到rhsLabel，否则，这个逻辑表达式直接跳到falseLabel
+            emit(rhsLabel + ":");
+            emitCond(ctx.expression(1), trueLabel, falseLabel); // 如果expression(0)是真，跳到了rhsLabel，此时判断expression(1)是否为真，是，跳到真标签，反之，跳到假
+            return;
+        }
+
+        // 短路或，左边假执行右
+        if(ctx.OR() != null){
+            String rhsLabel = freshLable();
+            emitCond(ctx.expression(0), trueLabel, rhsLabel);
+            emit(rhsLabel + ":");
+            emitCond(ctx.expression(1), trueLabel, falseLabel);
+            return;
+        }
+
+        // 非：交换真、假目的地
+        if(ctx.NOT() != null){
+            emitCond(ctx.expression(0), falseLabel, trueLabel);
+            return;
+        }
+
+        // 其他整数表达式：非零为真，零为假
+        Value value = emitValue(ctx);
+        if(value.type != SplType.INT){
+            throw new IllegalStateException("条件表达式必须是整数");
+        }
+        String test = freshTemp();
+        emit(test + " = icmp ne i32 " + value.operand + " , 0");
+        emit("br i1 " + test + ", label %" + trueLabel + ", label %" + falseLabel);
+    }
     private Value emitValue(Splc.ExpressionContext ctx){
-        // TODO
         if(ctx.Number() != null){
             return new Value(SplType.INT, ctx.Number().getText());
         }
-        if(ctx.expression().size() == 2)
+        if((ctx.Identifier() != null && ctx.getChildCount() == 1) || ctx.LBRACK() != null || ctx.DOT() != null){
+            Address address = emitAddress(ctx);
+            if (address.type.elementType != null) {
+                throw new UnsupportedOperationException("数组不能在这里作为整体值读取");
+            }
+            String tmp = freshTemp();
+            emit(tmp + " = load " + address.type.llvm() + ", ptr " + address.pointer);
+            return new Value(address.type, tmp);
+        }
+        if(ctx.expression().size() == 1){
+            if(ctx.LPAREN() != null){
+                return emitValue(ctx.expression(0));
+            }
+
+            // 一元+ - !
+            if(ctx.PLUS() != null){
+                return emitValue(ctx.expression(0));
+            }
+            if(ctx.MINUS() != null){
+                String operand = emitValue(ctx.expression(0)).operand;
+                String tmp = freshTemp();
+                emit(tmp + " = sub i32 0, " + operand);
+                return new Value(SplType.INT, tmp);
+            }
+            if(ctx.NOT() != null){
+                String operand = emitValue(ctx.expression(0)).operand;
+                String tmp = freshTemp();
+                emit(tmp + " = icmp eq i32 " + operand + ", 0");
+                String res = freshTemp();
+                emit(res + " = zext i1 " + tmp + " to i32");
+                return new Value(SplType.INT, res);
+            }
+        }
+
+        // 赋值
+        if(ctx.ASSIGN() != null){
+            Address left = emitAddress(ctx.expression(0));
+            if (left.type.elementType != null) {
+                throw new UnsupportedOperationException("不支持数组整体赋值");
+            }
+
+            Value right = emitValue(ctx.expression(1));
+            if(left.type != right.type){
+                throw new IllegalStateException("赋值两边类型不一致");
+            }
+            emit("store " + left.type.llvm() + " " + right.operand + " , ptr " + left.pointer);
+            return right;
+        }
+
+        // 逻辑
+        if(ctx.AND() != null || ctx.OR() != null){
+            String slot = freshTemp();
+            emit(slot + " = alloca i32");
+            String trueLabel = freshLable();
+            String falseLabel = freshLable();
+            String endLabel = freshLable();
+
+            emitCond(ctx, trueLabel, falseLabel);
+            emit(trueLabel + ":");
+            emit("store i32 1, ptr " + slot);
+            emit("br label %" + endLabel);
+
+            emit(falseLabel + ":");
+            emit("store i32 0, ptr " + slot);
+            emit("br label %" + endLabel);
+
+            emit(endLabel + ":");
+            String result = freshTemp();
+            emit(result + " = load i32, ptr " + slot);
+            return new Value(SplType.INT, result);
+        }
+        
+        if(ctx.expression().size() == 2
+                && (ctx.MUL() != null || ctx.DIV() != null || ctx.MOD() != null
+                    || ctx.PLUS() != null || ctx.MINUS() != null
+                    || ctx.LT() != null || ctx.LE() != null
+                    || ctx.GT() != null || ctx.GE() != null
+                    || ctx.EQ() != null || ctx.NEQ() != null
+                    || ctx.POW() != null)){
+            Value leftValue = emitValue(ctx.expression(0));
+            Value rightValue = emitValue(ctx.expression(1));
+            if(leftValue.type != SplType.INT || rightValue.type != SplType.INT){
+                throw new IllegalStateException("该运算要求整数操作数");
+            }
+            String left = leftValue.operand;
+            String right = rightValue.operand;    
+            String tmp = freshTemp();
+            if(ctx.MUL() != null){
+                emit(tmp + " = mul i32 " + left + " , " + right);
+                return new Value(SplType.INT, tmp);
+            }
+            if(ctx.DIV() != null){
+                emit(tmp + " = sdiv i32 " + left + " , " + right);
+                return new Value(SplType.INT, tmp);
+            }
+            if(ctx.MOD() != null){
+                emit(tmp + " = srem i32 " + left + " , " + right);
+                return new Value(SplType.INT, tmp);
+            }
+            if(ctx.PLUS() != null){
+                emit(tmp + " = add i32 " + left + " , " + right);
+                return new Value(SplType.INT, tmp);
+            }
+            if(ctx.MINUS() != null){
+                emit(tmp + " = sub i32 " + left + " , " + right);
+                return new Value(SplType.INT, tmp);
+            }
+
+            // 比较
+            String cmpOp = null;
+            if (ctx.LT()  != null) cmpOp = "slt";
+            else if (ctx.LE()  != null) cmpOp = "sle";
+            else if (ctx.GT()  != null) cmpOp = "sgt";
+            else if (ctx.GE()  != null) cmpOp = "sge";
+            else if (ctx.EQ()  != null) cmpOp = "eq";
+            else if (ctx.NEQ() != null) cmpOp = "ne";
+            
+            if (cmpOp != null) {
+                // 比较
+                emit(tmp + " = icmp " + cmpOp + " i32 " + left + ", " + right);
+                // 转成 i32
+                String res = freshTemp();
+                emit(res + " = zext i1 " + tmp + " to i32");
+                return new Value(SplType.INT, res);
+            }
+
+            // 幂值
+            if(ctx.POW() != null){
+                emit(tmp + " = call i32 @__spl_pow(i32 " + left + ", " + "i32 " + right + ")");
+                return new Value(SplType.INT, tmp);
+            }
+        }
+
         throw new UnsupportedOperationException("未支持的表达式");
+    }
+
+    private Address emitAddress(Splc.ExpressionContext ctx){
+        // 普通变量
+        if(ctx.Identifier() != null && ctx.getChildCount() == 1){
+            String name = ctx.Identifier().getText();
+            VariableSymbol symbol = currentScope.lookup(name);
+            if(symbol == null){
+                throw new IllegalStateException("未找到变量：" + name);
+            }
+            return new Address(symbol.llvmType, symbol.address);
+        }
+
+        // 括号
+        if(ctx.LPAREN() != null && ctx.expression().size() == 1){
+            return emitAddress(ctx.expression(0));
+        }
+
+        // 数组下标
+        if(ctx.LBRACK() != null){
+            Address base = emitAddress(ctx.expression(0));
+            if(base.type.elementType == null){
+                throw new IllegalStateException("下标访问的对象不是数组");
+            }
+
+            Value index = emitValue(ctx.expression(1));
+            if(index.type != SplType.INT){
+                throw new IllegalStateException("数组下表必须是整数");
+            }
+            String index64 = freshTemp();
+            emit(index64 + " = sext i32 " + index.operand + " to i64");
+            String pointer = freshTemp();
+            emit(pointer + " = getelementptr " + base.type.llvm()
+                    + ", ptr " + base.pointer
+                    + ", i64 0, i64 " + index64);
+            return new Address(base.type.elementType, pointer);
+        }
+
+        // 结构体
+        if(ctx.DOT() != null){
+            Address base = emitAddress(ctx.expression(0));
+            if(base.type.structName == null){
+                throw new IllegalStateException("成员访问的对象不是结构体");
+            }
+
+            String name = ctx.Identifier().getText();
+            int fieldIndex = base.type.structFieldNames.indexOf(name);
+            if(fieldIndex < 0){
+                throw new IllegalStateException("未找到结构体成员：" + name);
+            }
+            String tmp = freshTemp();
+            emit(tmp + " = getelementptr " + base.type.llvm()
+                    + ", ptr " + base.pointer
+                    + ", i64 0, i32 " + fieldIndex);  
+            return new Address(base.type.structFields.get(fieldIndex), tmp);
+        }
+        throw new UnsupportedOperationException("暂未实现左值地址计算:" + ctx.getText());
     }
 
     private static class FunctionSymbol {
@@ -123,7 +368,9 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         structVariables.clear();
         functions.clear();
         varCount = 0;
-        
+        tempCount = 0;
+        labelCount = 0;
+
         ir.setLength(0);
         ir.append("declare i32 @read()")
           .append("\n")
@@ -268,18 +515,25 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         emit(address + " = alloca " + st.llvm());
 
         if(ctx.expression() != null){
-            // TODO
-            if (st != SplType.INT) {
-                throw new UnsupportedOperationException("暂未支持非整数局部初始化");
+            
+            if (st.elementType != null) {
+                throw new UnsupportedOperationException("不支持数组整体初始化");
             }
 
             Value value = emitValue(ctx.expression());
-            if (value.type != SplType.INT) {
-                throw new UnsupportedOperationException("暂未支持非整数初始化值");
+            if (st != value.type) {
+                throw new IllegalStateException("初始化类型不一致");
             }
 
-            emit("store i32 " + value.operand + ", ptr " + address);
+            emit("store " + st.llvm() + " " + value.operand + ", ptr " + address);
         }
+        return null;
+    }
+
+    // 表达式
+    @Override 
+    public Void visitExpressionStatement(Splc.ExpressionStatementContext ctx) {
+        emitValue(ctx.expression());
         return null;
     }
 
