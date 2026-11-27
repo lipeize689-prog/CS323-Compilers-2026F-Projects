@@ -11,9 +11,15 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
     // OPTIONAL: you may remove, replace, or split this buffer.
     private final StringBuilder ir = new StringBuilder();
     protected void emit(String line) { ir.append(line).append('\n'); }
+    private Scope currentScope;
+    private final Map<String, SplType> structVariables = new HashMap<>(); // 根据结构体名找到类型对象以及字段信息
+    private final Map<String, FunctionSymbol> functions = new HashMap<>(); // 函数名到函数信息的映射
+    private final List<String> entryAllocas = new ArrayList<>(); // 函数内栈分配，防止while(){int x;}在循环内大规模alloca，这直到函数返回才能释放。因此统一在函数入口分配，不会改变作用域。
     private int varCount = 0;
     private int tempCount = 0;
     private int labelCount = 0; // 逻辑运算的标签
+    private boolean blockTerminated = false; // if/else等控制流 看当前分支是否有例如return的终止指令
+    private SplType currentReturnType;
     /** The ONLY required interface for the fixed framework. */
     private static class SplType {
         final SplType elementType; // 数组
@@ -88,6 +94,12 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
     private String freshLable(){
         return "bb." + (labelCount++);
     }
+
+    // 函数内栈分配管理
+    // 只登记分配指令，函数生成完后统一放到入口
+    private void emitAlloca(String address, SplType type){
+        entryAllocas.add(address + " = alloca " + type.llvm());
+    }
     // 条件跳转方法 真，跳到 trueLabel 假，跳到 falseLabel
     private void emitCond(Splc.ExpressionContext ctx, String trueLabel, String falseLabel){
         // 括号
@@ -100,7 +112,7 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         if(ctx.AND() != null){
             String rhsLabel = freshLable();
             emitCond(ctx.expression(0), rhsLabel, falseLabel); // 如果expression(0)是真，逻辑表达式的计算就跳到rhsLabel，否则，这个逻辑表达式直接跳到falseLabel
-            emit(rhsLabel + ":");
+            emitLabel(rhsLabel);
             emitCond(ctx.expression(1), trueLabel, falseLabel); // 如果expression(0)是真，跳到了rhsLabel，此时判断expression(1)是否为真，是，跳到真标签，反之，跳到假
             return;
         }
@@ -109,7 +121,7 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         if(ctx.OR() != null){
             String rhsLabel = freshLable();
             emitCond(ctx.expression(0), trueLabel, rhsLabel);
-            emit(rhsLabel + ":");
+            emitLabel(rhsLabel);
             emitCond(ctx.expression(1), trueLabel, falseLabel);
             return;
         }
@@ -127,8 +139,9 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         }
         String test = freshTemp();
         emit(test + " = icmp ne i32 " + value.operand + " , 0");
-        emit("br i1 " + test + ", label %" + trueLabel + ", label %" + falseLabel);
+        emitTerminator("br i1 " + test + ", label %" + trueLabel + ", label %" + falseLabel);
     }
+
     private Value emitValue(Splc.ExpressionContext ctx){
         if(ctx.Number() != null){
             return new Value(SplType.INT, ctx.Number().getText());
@@ -148,23 +161,28 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
             }
 
             // 一元+ - !
-            if(ctx.PLUS() != null){
-                return emitValue(ctx.expression(0));
-            }
-            if(ctx.MINUS() != null){
-                String operand = emitValue(ctx.expression(0)).operand;
+            if (ctx.PLUS() != null || ctx.MINUS() != null || ctx.NOT() != null) {
+                Value value = emitValue(ctx.expression(0));
+                if (value.type != SplType.INT) { // 一元运算只接受整数，操作数只求值一次
+                    throw new IllegalStateException("一元运算要求整数操作数");
+                }
+
+                if (ctx.PLUS() != null) {
+                    return value;
+                }
+
                 String tmp = freshTemp();
-                emit(tmp + " = sub i32 0, " + operand);
-                return new Value(SplType.INT, tmp);
+                if (ctx.MINUS() != null) {
+                    emit(tmp + " = sub i32 0, " + value.operand);
+                    return new Value(SplType.INT, tmp);
+                }
+
+                emit(tmp + " = icmp eq i32 " + value.operand + ", 0");
+                String result = freshTemp();
+                emit(result + " = zext i1 " + tmp + " to i32");
+                return new Value(SplType.INT, result);
             }
-            if(ctx.NOT() != null){
-                String operand = emitValue(ctx.expression(0)).operand;
-                String tmp = freshTemp();
-                emit(tmp + " = icmp eq i32 " + operand + ", 0");
-                String res = freshTemp();
-                emit(res + " = zext i1 " + tmp + " to i32");
-                return new Value(SplType.INT, res);
-            }
+
         }
 
         // 赋值
@@ -185,21 +203,21 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         // 逻辑
         if(ctx.AND() != null || ctx.OR() != null){
             String slot = freshTemp();
-            emit(slot + " = alloca i32");
+            emitAlloca(slot, SplType.INT);
             String trueLabel = freshLable();
             String falseLabel = freshLable();
             String endLabel = freshLable();
 
             emitCond(ctx, trueLabel, falseLabel);
-            emit(trueLabel + ":");
+            emitLabel(trueLabel);
             emit("store i32 1, ptr " + slot);
-            emit("br label %" + endLabel);
+            emitJump(endLabel);
 
-            emit(falseLabel + ":");
+            emitLabel(falseLabel);
             emit("store i32 0, ptr " + slot);
-            emit("br label %" + endLabel);
+            emitJump(endLabel);
 
-            emit(endLabel + ":");
+            emitLabel(endLabel);
             String result = freshTemp();
             emit(result + " = load i32, ptr " + slot);
             return new Value(SplType.INT, result);
@@ -266,6 +284,44 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
             }
         }
 
+        // 函数调用
+        if(ctx.Identifier() != null && ctx.LPAREN() != null){
+            String name = ctx.Identifier().getText(); 
+            FunctionSymbol function = functions.get(name);
+            if(function == null){
+                throw new IllegalStateException("函数未定义：" + name);
+            }
+            List<Splc.ExpressionContext> arguments = ctx.argumentList() == null ? List.of() : ctx.argumentList().expression();
+            if(arguments.size() != function.parameterTypes.size()){
+                throw new IllegalStateException("函数实参数量不匹配：" + name);
+            }
+            StringBuilder args = new StringBuilder();
+            for(int i = 0;i < arguments.size();i++){
+                SplType expected = function.parameterTypes.get(i);
+                Splc.ExpressionContext argument = arguments.get(i);
+                if(i > 0) args.append(", ");
+                
+                if(expected.elementType != null){
+                    // 数组，传地址
+                    Address address = emitAddress(argument);
+                    if(!sameType(expected, address.type)){
+                        throw new IllegalStateException("数组实参类型不匹配：" + name);
+                    }
+                    args.append("ptr ").append(address.pointer);
+                }else{
+                    // 整数、结构体值传递
+                    Value value = emitValue(argument);
+                    if(!sameType(expected, value.type)){
+                        throw new IllegalStateException("实参类型不匹配：" + name);
+                    }
+                    args.append(expected.llvm()).append(" ").append(value.operand);
+                }
+            }
+            String result = freshTemp();
+            emit(result + " = call " + function.returnType.llvm() + " @" + name + "(" + args + ")");
+            return new Value(function.returnType, result);
+        }
+
         throw new UnsupportedOperationException("未支持的表达式");
     }
 
@@ -323,9 +379,43 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
                     + ", i64 0, i32 " + fieldIndex);  
             return new Address(base.type.structFields.get(fieldIndex), tmp);
         }
+
+        // // 函数调用和赋值可以产生结构体值；需要访问字段时，先存入临时位置。例如int x = returnStruct().x
+        if((ctx.Identifier() != null && ctx.LPAREN() != null) || ctx.ASSIGN() != null){
+            Value value = emitValue(ctx);
+            if(value.type.structName == null){
+                throw new IllegalStateException("该表达式不是可取成员的结构体");
+            }
+            String address = freshTemp();
+            emitAlloca(address, value.type);
+            emit("store " + value.type.llvm() + " " + value.operand + ", ptr " + address);
+            return new Address(value.type, address);
+        }
         throw new UnsupportedOperationException("暂未实现左值地址计算:" + ctx.getText());
     }
 
+    // 开新基本块：输出标签 "L0:"，并重置终结标志 新块还没终结
+    private void emitLabel(String label){
+        emit(label + ":");
+        blockTerminated = false;
+    }
+
+    // 写终结指令并封块，已终结再写会抛异常
+    // 如{ return 0; } 时，生成 "ret i32 0" 后本块不能再写指令
+    private void emitTerminator(String instruction){
+        if(blockTerminated){
+            throw new IllegalStateException("当前基本块已经结束");
+        }
+        emit(instruction);
+        blockTerminated = true;
+    }
+
+    // emitJump —— 无条件跳转，本质是 emitTerminator("br label %x")
+    // 如if(x>0){write(1);} 时，then 块末尾生成 "br label %merge" 跳去汇合
+    // if/else中，跳转本就是终止
+    private void emitJump(String label){
+        emitTerminator("br label %" + label);
+    }
     private static class FunctionSymbol {
         final SplType returnType;
         final List<SplType> parameterTypes;
@@ -359,17 +449,21 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
             return null;
         }
     }
-    private Scope currentScope;
-    private final Map<String, SplType> structVariables = new HashMap<>(); // 根据结构体名找到类型对象以及字段信息
-    private final Map<String, FunctionSymbol> functions = new HashMap<>(); // 函数名到函数信息的映射
 
     public String generate(Splc.ProgramContext tree) {
         currentScope = new Scope(null);
         structVariables.clear();
         functions.clear();
+        functions.put("read", new FunctionSymbol(SplType.INT, List.of()));
+        functions.put("write", new FunctionSymbol(SplType.INT, List.of(SplType.INT)));
+        functions.put("__spl_pow", new FunctionSymbol(SplType.INT, List.of(SplType.INT, SplType.INT)));
+
         varCount = 0;
         tempCount = 0;
         labelCount = 0;
+        blockTerminated = false;
+        currentReturnType = null;
+
 
         ir.setLength(0);
         ir.append("declare i32 @read()")
@@ -429,9 +523,12 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
     @Override public Void visitFunctionDef(Splc.FunctionDefContext ctx) {
         // TODO: LLVM IR function signature, parameters, blocks and terminators.
         Scope outerScope = currentScope;
+        SplType outerReturnType = currentReturnType;
+        boolean outerTerminated = blockTerminated;
         currentScope = new Scope(outerScope);
         try{
             SplType returnType = resolveType(ctx.type());
+            currentReturnType = returnType;
             String name = ctx.Identifier().getText();
             List<SplType> paraList = new ArrayList<>();
             if(ctx.parameterList() != null){
@@ -452,7 +549,9 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
                 sb.append(parameterType).append(" %para").append(i);
             }
             emit("define " + returnType.llvm() + " @" + name + "(" + sb.toString() + ") {");
-
+            emitLabel(freshLable());
+            entryAllocas.clear(); // 函数内栈分配
+            int allocaPosition = ir.length(); // 之后统一写alloca指令写入的位置
             if(ctx.parameterList() != null){ 
                 for(int i = 0;i < paraList.size(); i++){
                     Splc.VariableDeclContext decl = ctx.parameterList().parameter(i).variableDecl();
@@ -465,7 +564,7 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
                         address = incoming;
                     } else{
                         address = "%local." + (varCount++);
-                        emit(address + " = alloca " + type.llvm());
+                        emitAlloca(address, type);
                         emit("store " + type.llvm() + " " + incoming + " , ptr " + address);
                         // define i32 @f(i32 %para0, %struct.Point %para1, ptr %para2)
                         // %local.1 = alloca %struct.Point
@@ -477,11 +576,22 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
             }
 
             for(Splc.StatementContext statement : ctx.block().statement()){
+                if(blockTerminated){
+                    break;
+                }
                 visit(statement);
+            }
+            if(!blockTerminated){
+                emitTerminator("unreachable"); // 保证IR中每个块都有终结指令
+            }
+            if(!entryAllocas.isEmpty()){
+                ir.insert(allocaPosition, String.join("\n", entryAllocas) + "\n"); // 函数内栈分配
             }
             emit("}");
         }finally{
             currentScope = outerScope;
+            currentReturnType = outerReturnType;
+            blockTerminated = outerTerminated;
         }
         
         return null;
@@ -494,6 +604,9 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         currentScope = new Scope(outerScope);
         try {
             for(Splc.StatementContext statement : ctx.statement()){
+                if(blockTerminated){
+                    break;
+                }
                 visit(statement);
             }
         } finally {
@@ -505,14 +618,13 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
     
     // 局部变量
     @Override public Void visitLocalVarDef(Splc.LocalVarDefContext ctx){
-        // TODO: 待实现赋值支持
         Splc.VariableDeclContext svdc = ctx.variableDecl();
         String name = svdc.Identifier().getText();
         SplType st = resolveDeclaredType(svdc);
         String address = "%local." + (varCount++);
         VariableSymbol vs = new VariableSymbol(st, address);
         currentScope.define(name, vs);
-        emit(address + " = alloca " + st.llvm());
+        emitAlloca(address, st); // 函数内栈分配
 
         if(ctx.expression() != null){
             
@@ -537,6 +649,71 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         return null;
     }
 
+    @Override
+    public Void visitReturnStatement(Splc.ReturnStatementContext ctx) {
+        Value value = emitValue(ctx.expression());
+        if (value.type != currentReturnType) {
+            throw new IllegalStateException("返回值类型与函数返回类型不一致");
+        }
+
+        emitTerminator("ret " + currentReturnType.llvm()
+                + " " + value.operand);
+        return null;
+    }
+
+    @Override 
+    public Void visitIfStatement(Splc.IfStatementContext ctx){
+        String thenLabel = freshLable();
+        String endLabel = freshLable();
+        boolean hasElse = ctx.block().size() == 2;
+        String elseLabel = hasElse ? freshLable() : endLabel;
+
+        emitCond(ctx.expression(), thenLabel, elseLabel);
+
+        emitLabel(thenLabel);
+        visit(ctx.block(0));
+        boolean thenTerminated = blockTerminated;
+        if(!thenTerminated){
+            emitJump(endLabel);
+        }
+        if(hasElse){
+            emitLabel(elseLabel);
+            visit(ctx.block(1));
+            boolean elseTerminal = blockTerminated;
+            if(!elseTerminal) {
+                emitJump(endLabel);
+            }
+            if(thenTerminated && elseTerminal){
+                // 两边都已结束，没有路径会到达后续语句
+                return null;
+            }
+        }
+        emitLabel(endLabel);
+        return null;
+    }
+
+    @Override
+    public Void visitWhileStatement(Splc.WhileStatementContext ctx) {
+        String condLabel = freshLable();
+        String bodyLabel = freshLable();
+        String endLabel = freshLable();
+
+        emitJump(condLabel);
+
+        emitLabel(condLabel);
+        emitCond(ctx.expression(), bodyLabel, endLabel);
+
+        emitLabel(bodyLabel);
+        visit(ctx.block());
+        if (!blockTerminated) {
+            emitJump(condLabel);
+        }
+
+        emitLabel(endLabel);
+        return null;
+    }
+
+
     private SplType resolveDeclaredType(Splc.VariableDeclContext decl){
         SplType type = resolveType(decl.type());
         for(int i = decl.arrayDimension().size() - 1;i >= 0;i--){
@@ -560,4 +737,18 @@ public class IRGenerator extends SplcBaseVisitor<Void> {
         }
         return type;
     }
+
+    // 整数、结构体比较类型对象；数组逐层比较长度和元素类型。
+    // 同名结构体都从表里拿同一个类型对象，所以引用相同就说明类型相同，不是在比较字段值。
+    private boolean sameType(SplType left, SplType right) {
+        if (left == right) {
+            return true;
+        }
+        if (left.elementType != null && right.elementType != null) {
+            return left.length.equals(right.length)
+                    && sameType(left.elementType, right.elementType);
+        }
+        return false;
+    }
+
 }
